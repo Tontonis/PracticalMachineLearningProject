@@ -1,0 +1,143 @@
+---
+title: "PracticalMachineLearningCoursework"
+author: "Hugo Day"
+date: "9 August 2018"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r, echo=FALSE}
+library(ggplot2);
+library(caret);
+library(caretEnsemble);
+library(rpart)
+library(randomForest)
+
+trainingFile <- "./pml-training.csv"
+testingFile <- "./pml-testing.csv"
+trainingURL<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+testingURL<-"https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+if(!file.exists(trainingFile)) {
+  setInternet2(TRUE);
+  download.file(trainingURL,trainingFile,method="auto");
+}
+if(!file.exists(testingFile)) {
+  setInternet2(TRUE);
+  download.file(testingURL,testingFile,method="auto");
+}
+
+trainingSet <- read.csv(trainingFile);
+testingSet <- read.csv(testingFile);
+set.seed(7)
+```
+
+## Wearable Electronics
+
+Fitbits, Garmins, Ambits, even the humble (try saying that a decade ago) smartphone. Wearable electronics are almost a pandemic nowadays, collecting vast troves of data from their wearers and the activities they do. Often they'll include a variety of accelerators and gyroscopes which might allow the classification of what activity they're doing, and possibly even *how* they're doing it. In this paper we'll look at whether these wearable devices can help assist people in doing their sport better, just from the device they're trying.
+
+## Introduction and Data Cleaning
+
+We won't show a summary or head of the data to be analysed as it's got 160 variables in the first instance, far larger than can be reasonably displayed here.
+
+160 variables is a lot to try and digest for a single model to digest, even a machine learning model. In this case a method of finding which variables are significant is needed. A good measure is the variance of the variables; a variable with a low variance is unlikely to have a substantial determinant of the outcome value. We're also chiefly interested in predicting quality of movement from the *accelerometers*. Variables made up only of NAs will also be removed. Combining these three filters it should be possible to reduce the number of variables considerably.
+
+```{r}
+nearZeroVarStore<-nearZeroVar(trainingSet,saveMetrics=TRUE)
+filtTraining<-trainingSet[,!nearZeroVarStore$nzv]
+filtTesting<-testingSet[,!nearZeroVarStore$nzv]
+filtTraining<-filtTraining[,grep("accel|classe", names(filtTraining), value=TRUE)]
+filtTesting<-filtTesting[,grep("accel", names(filtTesting), value=TRUE)]
+nans<-(colSums(is.na(filtTraining))==0)
+filtTraining<-filtTraining[,nans]
+nans<-(colSums(is.na(filtTesting))==0)
+filtTesting<-filtTesting[,nans]
+```
+The brings our original 160 variables down to only 20, a much more reasonable number. Due to large size of the training set it can be broken into a training set and a validation set without too much lost model accuracy. A 70/30 split for training/validation seems reasonable.
+
+```{r}
+inTrain<-createDataPartition(filtTraining$classe,p=0.70,list=FALSE)
+filtTraining<-filtTraining[inTrain,]
+filtValidation<-filtTraining[-inTrain,]
+```
+
+## Model Choice and Data Exploration
+
+After quite some processing we have a more condensed data set. The outcome variable has five classes (a,b,c,d,e), which lends itself well to classification-type models. In this instance a 5-fold cross validation is used to derive a reasonable out of sample error (although higher variance) from the training dataset.
+
+This is controlled using the train conctrol function.
+
+```{r}
+TrainCon<-trainControl(method = "cv", 5);
+```
+
+A basic decision tree model is examined first.
+
+```{r}
+modFitDT<-train(classe~.,data=filtTraining,method="rpart",trControl = TrainCon);
+```
+
+And checking against the validation set.
+
+```{r}
+predDT<-predict(modFitDT,filtValidation)
+conMatDT<-confusionMatrix(filtValidation$classe,predDT)
+print(conMatDT)
+```
+
+It's immediately clear that the accuracy is not very promising, only 42%. The specificity is good, but better results can likely be achieved. In addition the out of sample error would be quite large with this model.
+
+Random forests and gradient boosted decision trees are types of classification models that typically have very high accuracy rate, so models based on both methods are trained here. In this instance the output of the gradient boosted model in suppressed otherwise it becomes verbose and ungainly.
+
+```{r}
+modFitRF<-train(classe~.,data=filtTraining,method="rf",trControl = TrainCon);
+modFitGBM<-train(classe~.,data=filtTraining,method="gbm",trControl = TrainCon,verbose=FALSE);
+```
+
+And predicting the validation set based on these models.
+
+```{r}
+predRF<-predict(modFitRF,filtValidation)
+conMatRF<-confusionMatrix(filtValidation$classe,predRF)
+predGBM<-predict(modFitGBM,filtValidation)
+conMatGBM<-confusionMatrix(filtValidation$classe,predGBM)
+
+print(conMatRF)
+print(conMatGBM)
+```
+
+Rather extraordinarily the random forest model gives an almost perfect accuracy and the out-of-sample area demonstrates being low in this instance. The boosted decision model is better than the standard decision tree at 85% accuracy, but not as high as the random forest. It does exhibit a reasonable specificity of 96% and is far faster to generate than the random forest.
+
+In this instance the random forest model is chosen for use on the testing set, with the caveat that in some instances it's long training time may need to be considered compared to it's accuracy, but in this instance it's near 100% accuracy is considered worth the computational time.
+
+## Model Comments
+
+For a little more examination of model, the variable importance plot for the random forest will give a sense of relative significance of each variable involved in the prediction.
+
+```{r}
+varImpPlot(randomForest(classe~.,data=filtTraining))
+```
+
+This implies that the dumbbell y/z acceleration and the belt Z acceleration are the most prominant variables in determining the quality of movement, although they do not outstrip the significance of other variables by more than double at most. 
+
+To give a sense of the error with the number of trees
+
+```{r}
+plot(modFitRF$finalModel, main="Error by Number of Trees")
+```
+
+This implies that the error of the model decreases rapidly with the number of trees, being very low after 100 trees and almost flat after 200. In this instance the used 500 trees was overthorough and may have resulted in overfitting. 
+
+## Testing Predictions
+
+Finally as the piece-de-resistance, the random forest model is run against the test set, and the results saved to a csv for submission for the course.
+
+```{r}
+testPredict<-predict(modFitRF,filtTesting)
+write.csv2(testPredict,file="./pml-test-predictions.csv")
+```
